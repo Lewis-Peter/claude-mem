@@ -93,6 +93,10 @@ export interface SettingsDefaults {
   CLAUDE_MEM_SERVER_BETA_URL: string;
   CLAUDE_MEM_SERVER_BETA_API_KEY: string;
   CLAUDE_MEM_SERVER_BETA_PROJECT_ID: string;
+  // Rotation job (idle-time observation dedup pass, HTTP-triggered only).
+  CLAUDE_MEM_ROTATION_ENABLED: string;
+  CLAUDE_MEM_ROTATION_AUTOMERGE_THRESHOLD: string;
+  CLAUDE_MEM_ROTATION_CANDIDATE_THRESHOLD: string;
 }
 
 export class SettingsDefaultsManager {
@@ -183,6 +187,9 @@ export class SettingsDefaultsManager {
     CLAUDE_MEM_SERVER_BETA_URL: `http://127.0.0.1:${process.env.CLAUDE_MEM_SERVER_PORT ?? String(37877 + ((process.getuid?.() ?? 77) % 100))}`,  // Legacy server-beta runtime URL — UID-derived for multi-account isolation
     CLAUDE_MEM_SERVER_BETA_API_KEY: '',                     // Legacy local hook API key (read as fallback when CLAUDE_MEM_SERVER_API_KEY unset)
     CLAUDE_MEM_SERVER_BETA_PROJECT_ID: '',                  // Legacy Postgres project_id (read as fallback when CLAUDE_MEM_SERVER_PROJECT_ID unset)
+    CLAUDE_MEM_ROTATION_ENABLED: 'true',                    // Idle-time observation-dedup rotation job, reachable only via POST /api/maintenance/rotation/run
+    CLAUDE_MEM_ROTATION_AUTOMERGE_THRESHOLD: '0.92',        // Chroma similarity above which a candidate cluster auto-merges with no LLM call
+    CLAUDE_MEM_ROTATION_CANDIDATE_THRESHOLD: '0.75',        // Chroma similarity floor for a pair to even be considered for rotation merge (below this: unrelated)
   };
 
   static getAllDefaults(): SettingsDefaults {
@@ -196,6 +203,15 @@ export class SettingsDefaultsManager {
   static getInt(key: keyof SettingsDefaults): number {
     const value = this.get(key);
     return parseInt(value, 10);
+  }
+
+  static getFloat(key: keyof SettingsDefaults): number {
+    const value = this.get(key);
+    return parseFloat(value);
+  }
+
+  static getBool(key: keyof SettingsDefaults): boolean {
+    return this.get(key) === 'true';
   }
 
   private static applyEnvOverrides(settings: SettingsDefaults): SettingsDefaults {

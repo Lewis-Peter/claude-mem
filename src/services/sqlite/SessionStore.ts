@@ -109,6 +109,7 @@ export class SessionStore {
     this.ensurePendingMessagesSessionToolUniqueIndex();
     this.ensureSyncedAtColumns(options.cloudSyncStatePath ?? paths.cloudSyncState());
     this.requeuePromptCloudSyncAfterMapperFix();
+    this.addObservationSupersededByIdColumn();
   }
 
   private getIndexColumns(indexName: string): string[] {
@@ -1472,6 +1473,24 @@ export class SessionStore {
     this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(30, new Date().toISOString());
   }
 
+  /**
+   * Rotation job soft-delete column. NULL = active/not-superseded; a
+   * non-NULL value means this row has been replaced by the observation at
+   * that id (never hard-deleted, always reversible). Version 31 — 30 was
+   * the highest schema_versions entry in the file at the time this was added.
+   */
+  private addObservationSupersededByIdColumn(): void {
+    const cols = this.db.query('PRAGMA table_info(observations)').all() as TableColumnInfo[];
+    const hasColumn = cols.some(c => c.name === 'superseded_by_id');
+
+    if (!hasColumn) {
+      this.db.run('ALTER TABLE observations ADD COLUMN superseded_by_id INTEGER DEFAULT NULL');
+      logger.debug('DB', 'Added superseded_by_id column to observations table (rotation job)');
+    }
+
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(31, new Date().toISOString());
+  }
+
   updateMemorySessionId(sessionDbId: number, memorySessionId: string | null): void {
     this.db.prepare(`
       UPDATE sdk_sessions
@@ -1726,6 +1745,34 @@ export class SessionStore {
     `);
 
     return stmt.get(id, normalizePlatformSource(platformSource)) as ObservationRecord | undefined || null;
+  }
+
+  /**
+   * Non-superseded observations for a single project, oldest-first. Used by
+   * the rotation job to build clustering candidates — always filters on
+   * superseded_by_id IS NULL so a row merged by a prior rotation run is
+   * never re-clustered.
+   */
+  getActiveObservationsForProject(project: string): ObservationRecord[] {
+    const stmt = this.db.prepare(`
+      SELECT *
+      FROM observations
+      WHERE project = ? AND superseded_by_id IS NULL
+      ORDER BY created_at_epoch ASC
+    `);
+
+    return stmt.all(project) as ObservationRecord[];
+  }
+
+  /**
+   * Marks an observation as superseded by another (the consolidated
+   * observation written by a merge). Never deletes the row — reversible by
+   * clearing the column back to NULL if needed.
+   */
+  markObservationSuperseded(observationId: number, supersededById: number): void {
+    this.db.prepare(`
+      UPDATE observations SET superseded_by_id = ? WHERE id = ?
+    `).run(supersededById, observationId);
   }
 
   getObservationsByIds(
